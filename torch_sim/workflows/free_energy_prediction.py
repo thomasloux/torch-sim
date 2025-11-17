@@ -1,7 +1,65 @@
-"""Free energy prediction workflows using thermodynamic integration.
+"""Workflow implementations for free energy prediction using thermodynamic integration.
 
-This module provides complete workflows for free energy prediction using
-thermodynamic integration methods with Einstein model references.
+Two main approaches are implemented:
+
+1. Forward TI with Einstein reference:
+    - Compute Einstein model frequencies from NVT simulation of reference model
+    - Run multiple forward TI trajectories from Einstein model to target model
+    - Compute free energy difference using Jarzynski equality
+  Reference:
+    - Jarzynski equality: <https://doi.org/10.1103/PhysRevLett.78.2690>
+2. Forward-backward TI:
+    - Run forward TI from model_a to model_b
+    - Equilibrate at model_b
+    - Run backward TI from model_b to model_a (with reverse=True)
+    - Compute free energy using Jarzynski equality and adiabatic switching method
+ Reference:
+    - de Koning, Maurice, and A. Antonelli.
+    "Adiabatic switching applied to realistic crystalline solids: Vacancy-formation
+    free energy in copper." Physical Review B 55.2 (1997): 735.
+
+Inspiration and sources:
+    - https://calorine.materialsmodeling.org/get_started/free_energy_tutorial.html
+    - Freitas, Rodrigo, Mark Asta, and Maurice De Koning.
+    "Nonequilibrium free-energy calculation of solids using LAMMPS."
+    Computational Materials Science 112 (2016): 333-341.
+
+Example usage:
+
+# Forward TI with Einstein reference
+    >>> from torch_sim.workflows.free_energy_workflows import (
+    ...     run_forward_ti_with_einstein_workflow,
+    ... )
+    >>> results = run_forward_ti_with_einstein_workflow(
+    ...     system=my_system,
+    ...     model_a=reference_model,  # Used to compute Einstein frequencies
+    ...     model_b=target_model,
+    ...     temperature=300.0,
+    ...     save_dir="./ti_results",
+    ...     n_trajectories=10,
+    ...     n_ti_steps=1000
+    )
+
+# Forward-backward TI
+    >>> from torch_sim.workflows.free_energy_workflows import (
+    ...     run_forward_backward_ti_workflow,
+    ... )
+    >>> results = run_forward_backward_ti_workflow(
+    ...     system=my_system,
+    ...     model_a=model_a,
+    ...     model_b=model_b,
+    ...     temperature=300.0,
+    ...     save_dir="./ti_results",
+    ...     n_trajectories=10,
+    ...     n_ti_steps=1000,
+    ...     n_equil_steps=500,
+    ... )
+
+Both workflows return dictionaries with:
+- free energy differences
+- work distributions
+- trajectory data
+- statistical analysis (mean, std dev)
 """
 
 import logging
@@ -11,16 +69,11 @@ from collections.abc import Callable
 import torch
 
 import torch_sim as ts
-from torch_sim.integrators.nvt import nvt_langevin
 from torch_sim.models.einstein import EinsteinModel
 from torch_sim.models.interface import ModelInterface
 from torch_sim.state import SimState
-from torch_sim.steered_md import (
-    nvt_langevin_thermodynamic_integration,
-    run_equilibrium_md,
-    run_non_equilibrium_md,
-)
 from torch_sim.units import BaseConstant, UnitConversion
+from torch_sim.workflows.steered_md import run_equilibrium_md, run_non_equilibrium_md
 
 
 logger = logging.getLogger(__name__)
@@ -98,7 +151,7 @@ def compute_einstein_frequencies_from_nvt(
     _ = ts.integrate(
         system,
         model,
-        integrator=nvt_langevin,
+        integrator=ts.Integrator.nvt_vrescale,
         n_steps=n_steps,
         timestep=timestep,
         temperature=temperature,
@@ -121,70 +174,6 @@ def compute_einstein_frequencies_from_nvt(
     kB = BaseConstant.k_B / UnitConversion.eV_to_J  # Boltzmann constant in eV/K
 
     return torch.sqrt(3 * kB * temperature / (system.masses * square_deviations))
-
-
-# Complete workflow implementations for free energy prediction using
-# thermodynamic integration
-#
-# Two main approaches are implemented:
-#
-# 1. Forward TI with Einstein reference:
-#    - Compute Einstein model frequencies from NVT simulation of reference model
-#    - Run multiple forward TI trajectories from Einstein model to target model
-#    - Compute free energy difference using Jarzynski equality
-#   Reference:
-#   - Jarzynski equality: <https://doi.org/10.1103/PhysRevLett.78.2690>
-# 2. Forward-backward TI:
-#    - Run forward TI from model_a to model_b
-#    - Equilibrate at model_b
-#    - Run backward TI from model_b to model_a (with reverse=True)
-#    - Compute free energy using Jarzynski equality and adiabatic switching method
-#  Reference:
-#   - de Koning, Maurice, and A. Antonelli.
-#   "Adiabatic switching applied to realistic crystalline solids: Vacancy-formation
-#   free energy in copper." Physical Review B 55.2 (1997): 735.
-#
-# Inspiration and sources:
-# - https://calorine.materialsmodeling.org/get_started/free_energy_tutorial.html
-# - Freitas, Rodrigo, Mark Asta, and Maurice De Koning.
-#   "Nonequilibrium free-energy calculation of solids using LAMMPS."
-#   Computational Materials Science 112 (2016): 333-341.
-#
-# Example usage:
-#
-# # Forward TI with Einstein reference
-# from torch_sim.workflows.free_energy_workflows import (
-#     run_forward_ti_with_einstein_workflow
-# )
-# results = run_forward_ti_with_einstein_workflow(
-#     system=my_system,
-#     model_a=reference_model,  # Used to compute Einstein frequencies
-#     model_b=target_model,
-#     temperature=300.0,
-#     save_dir="./ti_results",
-#     n_trajectories=10,
-#     n_ti_steps=1000
-# )
-#
-# # Forward-backward TI
-# from torch_sim.workflows.free_energy_workflows import run_forward_backward_ti_workflow
-# results = run_forward_backward_ti_workflow(
-#     system=my_system,
-#     model_a=model_a,
-#     model_b=model_b,
-#     temperature=300.0,
-#     save_dir="./ti_results",
-#     n_trajectories=10,
-#     n_ti_steps=1000,
-#     n_equil_steps=500
-# )
-#
-# Both workflows return dictionaries with:
-# - free energy differences
-# - work distributions
-# - trajectory data
-# - statistical analysis (mean, std dev)
-#
 
 
 def run_forward_ti_workflow_from_einstein(
@@ -265,7 +254,6 @@ def run_forward_ti_workflow_from_einstein(
         model_a=einstein_model,
         model_b=model,
         save_dir=save_dir,
-        integrator=nvt_langevin_thermodynamic_integration,
         n_steps=n_ti_steps,
         lambda_schedule=lambda_schedule,
         reverse=False,
@@ -413,7 +401,6 @@ def run_forward_backward_ti_workflow_from_einstein(
         model_a=einstein_model,
         model_b=model,
         save_dir=forward_dir,
-        integrator=nvt_langevin_thermodynamic_integration,
         n_steps=n_ti_steps,
         lambda_schedule=lambda_schedule,
         reverse=False,
@@ -427,7 +414,7 @@ def run_forward_backward_ti_workflow_from_einstein(
     equilibrated_state = ts.integrate(
         system=forward_final_state,
         model=model,
-        integrator=nvt_langevin,
+        integrator=ts.Integrator.nvt_vrescale,
         n_steps=n_equil_steps,
         temperature=temperature,
         timestep=timestep,
@@ -441,7 +428,6 @@ def run_forward_backward_ti_workflow_from_einstein(
         model_a=einstein_model,
         model_b=model,
         save_dir=backward_dir,
-        integrator=nvt_langevin_thermodynamic_integration,
         n_steps=n_ti_steps,
         lambda_schedule=lambda_schedule,
         reverse=True,  # This is the key difference
@@ -599,7 +585,6 @@ def run_thermodynamic_integration_from_einstein(
             model_b=model,
             lambdas=lambdas,
             save_dir=save_dir,
-            integrator=nvt_langevin_thermodynamic_integration,
             n_steps=n_ti_steps,
             temperature=temperature,
             timestep=timestep,
@@ -622,7 +607,6 @@ def run_thermodynamic_integration_from_einstein(
                 model_b=model,
                 lambdas=lambda_,
                 save_dir=save_dir,
-                integrator=nvt_langevin_thermodynamic_integration,
                 n_steps=n_ti_steps,
                 filenames=[f"trajectory_lambda_{i}.h5"],
                 temperature=temperature,
