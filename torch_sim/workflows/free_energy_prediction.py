@@ -228,6 +228,7 @@ def run_forward_ti_workflow_from_einstein(
             device=system.device,
             dtype=system.dtype,
         )
+        frequencies = frequencies.repeat(n_trajectories)
 
     logger.info(
         "Einstein frequencies (eV^(0.5)/A/amu^(0.5)): %s", frequencies.cpu().numpy()
@@ -240,7 +241,7 @@ def run_forward_ti_workflow_from_einstein(
     # Define reference Einstein model
     einstein_model = EinsteinModel.from_atom_and_frequencies(
         atom=batched_system,
-        frequencies=frequencies.repeat(n_trajectories),
+        frequencies=frequencies,
         device=batched_system.device,
         dtype=batched_system.dtype,
     )
@@ -372,6 +373,7 @@ def run_forward_backward_ti_workflow_from_einstein(
             device=system.device,
             dtype=system.dtype,
         )
+        frequencies = frequencies.repeat(n_trajectories)
 
     # Prepare batched systems for multiple trajectories
     systems = [system.clone() for _ in range(n_trajectories)]
@@ -380,7 +382,7 @@ def run_forward_backward_ti_workflow_from_einstein(
     # Define reference Einstein model
     einstein_model = EinsteinModel.from_atom_and_frequencies(
         atom=batched_system,
-        frequencies=frequencies.repeat(n_trajectories),
+        frequencies=frequencies,
         device=batched_system.device,
         dtype=batched_system.dtype,
     )
@@ -558,12 +560,13 @@ def run_thermodynamic_integration_from_einstein(
             timestep=timestep,
         )
         # Use same frequencies for all atoms of same type
-        frequencies = torch.full(
-            (system.n_atoms,),
-            frequencies.mean().item(),
-            device=system.device,
-            dtype=system.dtype,
-        )
+        # frequencies = torch.full(
+        #     (system.n_atoms,),
+        #     frequencies.mean().item(),
+        #     device=system.device,
+        #     dtype=system.dtype,
+        # )
+        frequencies = float(frequencies.mean().item())
 
     if run_parallel:
         # Prepare batched systems for multiple trajectories
@@ -573,7 +576,7 @@ def run_thermodynamic_integration_from_einstein(
         # Define reference Einstein model
         einstein_model = EinsteinModel.from_atom_and_frequencies(
             atom=batched_system,
-            frequencies=frequencies.repeat(len(lambdas)),
+            frequencies=frequencies,
             device=batched_system.device,
             dtype=batched_system.dtype,
         )
