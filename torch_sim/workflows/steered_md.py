@@ -51,7 +51,7 @@ LAMBDA_SCHEDULES = {
 }
 
 
-@dataclass
+@dataclass(kw_only=True)
 class ThermodynamicIntegrationMDState(NVTVRescaleState):
     """Custom state for thermodynamic integration in MD simulations.
 
