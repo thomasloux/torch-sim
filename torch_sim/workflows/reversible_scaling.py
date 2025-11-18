@@ -66,8 +66,8 @@ class ScaledModel(ModelInterface):
         results = self.model.forward(state)
         results["unscaled_energy"] = results["energy"]
         results["energy"] = results["energy"] * state.lambda_
-        results["forces"] = results["forces"] * state.lambda_
-        results["stress"] = results["stress"] * state.lambda_
+        results["forces"] = results["forces"] * state.lambda_[state.system_idx][:, None]
+        results["stress"] = results["stress"] * state.lambda_[:, None, None]
         return results
 
 
