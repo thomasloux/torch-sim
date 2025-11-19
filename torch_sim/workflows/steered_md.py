@@ -599,7 +599,7 @@ def run_equilibrium_md(  # noqa: C901
     update_fn = partial(update_fn, dt=dt, model=model)
 
     # batch_iterator will be a list if autobatcher is False
-    batch_iterator = _configure_batches_iterator(model, state, autobatcher=autobatcher)
+    batch_iterator = _configure_batches_iterator(state, model, autobatcher=autobatcher)
     trajectory_reporter = _configure_reporter(
         trajectory_reporter,
         properties=["kinetic_energy", "potential_energy", "temperature"],
