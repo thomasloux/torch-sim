@@ -385,7 +385,7 @@ def compute_work_reversible_scaling(
     return torch.cumsum(energy_per_atom[:-1] * delta_lambda, dim=-1)
 
 
-def run_forward_backward_reversible_scaling(  # noqa: PLR0915
+def run_forward_backward_reversible_scaling(
     system: SimState,
     model: ModelInterface,
     temperature_start: float,
@@ -488,7 +488,7 @@ def run_forward_backward_reversible_scaling(  # noqa: PLR0915
         model=model,
         integrator=(init_fn, step_fn),
         n_steps=n_equil_steps,
-        temperature=temperature_end,
+        temperature=temperature_start,
         timestep=timestep,
     )
 
@@ -508,22 +508,22 @@ def run_forward_backward_reversible_scaling(  # noqa: PLR0915
         isothermal_compressibility=isothermal_compressibility,
     )
 
-    # Equilibrate at model_b
-    logger.info("Equilibrating at target model for %d steps...", n_equil_steps)
-    equilibrated_state = ts.integrate(
-        system=forward_final_state,
-        model=model,
-        integrator=(init_fn, step_fn),
-        n_steps=n_equil_steps,
-        temperature=temperature_end,
-        timestep=timestep,
-    )
+    # # Equilibrate at model_b
+    # logger.info("Equilibrating at target model for %d steps...", n_equil_steps)
+    # equilibrated_state = ts.integrate(
+    #     system=forward_final_state,
+    #     model=model,
+    #     integrator=(init_fn, step_fn),
+    #     n_steps=n_equil_steps,
+    #     temperature=temperature_end,
+    #     timestep=timestep,
+    # )
 
     logger.info("Running %d backward TI trajectories...", n_trajectories)
 
     # Run backward TI (B -> A)
     _ = run_reversible_scaling_steered_md(
-        system=equilibrated_state,
+        system=forward_final_state,
         model=model,
         temperature_start=temperature_start,
         temperature_end=temperature_end,
