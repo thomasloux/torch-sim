@@ -78,6 +78,7 @@ from torch_sim.optimizers.cell_filters import (
     CellOptimState,
     get_cell_filter,
 )
+from torch_sim.plumed import PlumedModel
 from torch_sim.properties.correlations import CorrelationCalculator
 from torch_sim.quantities import (
     calc_kinetic_energy,
@@ -132,6 +133,7 @@ __all__ = [
     "NVTNoseHooverState",
     "OptimState",
     "Optimizer",
+    "PlumedModel",
     "SimState",
     "SwapMCState",
     "SwapMCState",
