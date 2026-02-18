@@ -1,3 +1,4 @@
+import os
 from typing import Any
 
 import pytest
@@ -13,7 +14,7 @@ from torch_sim.testing import SIMSTATE_GENERATORS
 
 
 DEVICE = torch.device("cpu")
-DTYPE = torch.float64
+DTYPE = torch.float32 if os.environ.get("TS_TEST_DTYPE") == "float32" else torch.float64
 
 
 def _make_simstate_fixture(name: str) -> pytest.fixture:

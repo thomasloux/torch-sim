@@ -91,6 +91,7 @@ from torch_sim.runners import (
     optimize,
     static,
 )
+from torch_sim.plumed import PlumedModel
 from torch_sim.state import SimState, concatenate_states, initialize_state
 from torch_sim.trajectory import TorchSimTrajectory, TrajectoryReporter
 
