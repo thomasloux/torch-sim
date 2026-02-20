@@ -14,6 +14,7 @@ from torch_sim import (
     math,
     models,
     monte_carlo,
+    multi_cell_mc,
     neighbors,
     optimizers,
     quantities,
@@ -51,6 +52,14 @@ from torch_sim.integrators.npt import (
     npt_nose_hoover_step,
 )
 from torch_sim.monte_carlo import SwapMCState, swap_mc_init, swap_mc_step
+from torch_sim.multi_cell_mc import (
+    MultiCellMCState,
+    analyze_phases,
+    is_lever_rule_feasible,
+    multi_cell_mc_init,
+    multi_cell_mc_optimize,
+    multi_cell_mc_step,
+)
 from torch_sim.optimizers import (
     OPTIM_REGISTRY,
     BFGSState,
