@@ -31,8 +31,9 @@ dependencies = [
     "nvalchemi-toolkit-ops>=0.2.0",
     "numpy>=1.26,<3",
     "tables>=3.10.2",
-    "torch>=2",
+    "torch>=2, <2.10",
     "tqdm>=4.67",
+    "icet>=3.2",
 ]
 
 [project.optional-dependencies]
@@ -185,7 +186,11 @@ conflicts = [
 ]
 
 [dependency-groups]
-dev = ["prek>=0.2.0", "ty>=0.0.1a20"]
+dev = [
+    "prek>=0.2.0",
+    "pytest>=9.0.2",
+    "ty>=0.0.1a20",
+]
 
 [tool.ty.rules]
 # TODO: Unable to work with **kwargs: https://github.com/astral-sh/ty/issues/247
