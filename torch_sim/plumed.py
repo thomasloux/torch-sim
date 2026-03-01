@@ -53,6 +53,7 @@ from torch_sim.state import SimState
 
 
 if TYPE_CHECKING:
+    from torch_sim.plumed_builder import BiasAction
     from torch_sim.typing import MemoryScaling, StateDict
 
 
@@ -64,6 +65,60 @@ _PLUMED_LENGTH_FACTOR: float = 0.1  # 1 Å = 0.1 nm
 _PLUMED_ENERGY_FACTOR: float = 96.4853321  # 1 eV = 96.4853321 kJ/mol
 _PLUMED_TIME_FACTOR: float = 1.0  # 1 ps = 1 ps
 _PLUMED_MASS_FACTOR: float = 1.0  # 1 amu = 1 amu
+
+
+def _is_action_list(inp: object) -> bool:
+    """Return True if *inp* looks like a flat list of BiasAction objects."""
+    return (
+        isinstance(inp, list)
+        and bool(inp)
+        and hasattr(inp[0], "to_plumed_lines")
+        and hasattr(inp[0], "collect_cvs")
+    )
+
+
+def _is_per_system_action_list(inp: object) -> bool:
+    """Return True if *inp* looks like a per-system list of BiasAction lists."""
+    return (
+        isinstance(inp, list)
+        and bool(inp)
+        and isinstance(inp[0], list)
+        and bool(inp[0])
+        and hasattr(inp[0][0], "to_plumed_lines")
+        and hasattr(inp[0][0], "collect_cvs")
+    )
+
+
+def _normalize_plumed_input(
+    plumed_input: list[str] | list[list[str]] | str | Path | list[BiasAction]
+    | list[list[BiasAction]],
+) -> list[str] | list[list[str]] | str | Path:
+    """Normalize a plumed_input that may contain BiasAction lists to strings.
+
+    If *plumed_input* is a flat list of :class:`~torch_sim.plumed_builder.BiasAction`
+    objects, it is converted to a ``list[str]`` via
+    :func:`~torch_sim.plumed_builder.build_plumed_input`.  A per-system list
+    of action lists is converted to a ``list[list[str]]``.  All other input
+    types are returned unchanged.
+
+    Args:
+        plumed_input: PLUMED input in any accepted form.
+
+    Returns:
+        list[str] | list[list[str]] | str | Path: Normalised input with no
+        :class:`~torch_sim.plumed_builder.BiasAction` objects remaining.
+    """
+    if _is_action_list(plumed_input):
+        from torch_sim.plumed_builder import build_plumed_input
+
+        return build_plumed_input(plumed_input)  # type: ignore[arg-type]
+    if _is_per_system_action_list(plumed_input):
+        from torch_sim.plumed_builder import build_plumed_input
+
+        return [
+            build_plumed_input(actions) for actions in plumed_input  # type: ignore[arg-type]
+        ]
+    return plumed_input  # type: ignore[return-value]
 
 
 def _load_plumed_lines(plumed_input: list[str] | str | Path) -> list[str]:
@@ -164,7 +219,8 @@ class PlumedModel(ModelInterface):
     def __init__(
         self,
         model: ModelInterface,
-        plumed_input: list[str] | list[list[str]] | str | Path,
+        plumed_input: list[str] | list[list[str]] | str | Path
+        | list[BiasAction] | list[list[BiasAction]],
         timestep: float,
         kT: float = 1.0,
         log: str | Path = "",
@@ -185,6 +241,11 @@ class PlumedModel(ModelInterface):
                 - A ``str`` or ``Path`` pointing to a PLUMED ``.dat`` file
                   (treated as shared input, with automatic file suffixing for
                   multi-system runs).
+                - A ``list[BiasAction]`` of
+                  :class:`~torch_sim.plumed_builder.BiasAction` objects
+                  (Pythonic builder API; converted to strings automatically).
+                - A ``list[list[BiasAction]]`` of per-system action lists
+                  (also converted automatically).
 
             timestep: MD timestep in ps. Must match the timestep passed to
                 ``integrate()``.
@@ -199,7 +260,7 @@ class PlumedModel(ModelInterface):
         """
         super().__init__()
         self.model = model
-        self.plumed_input = plumed_input
+        self.plumed_input = _normalize_plumed_input(plumed_input)
         self.timestep = timestep
         self.kT = kT
         self.log = log
