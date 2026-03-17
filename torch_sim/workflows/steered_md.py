@@ -600,9 +600,7 @@ def run_equilibrium_md(  # noqa: C901
         tqdm_pbar = tqdm(total=state.n_systems, **pbar_kwargs)
 
     for state, system_indices in batch_iterator:
-        batch_lambdas = (
-            lambdas[system_indices] if system_indices else lambdas
-        )
+        batch_lambdas = lambdas[system_indices] if system_indices else lambdas
         state = init_fn(state=state, lambda_=batch_lambdas, kT=kT)
 
         # set up trajectory reporters
