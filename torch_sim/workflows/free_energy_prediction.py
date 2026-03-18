@@ -190,6 +190,7 @@ def run_forward_ti_workflow_from_einstein(
     n_ti_steps: int = 1000,
     timestep: float = 0.002,
     lambda_schedule: str | Callable = "linear",
+    mixing_functions: dict[str, Callable] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Run standard forward thermodynamic integration workflow.
 
@@ -204,6 +205,8 @@ def run_forward_ti_workflow_from_einstein(
         n_ti_steps: Number of TI steps per trajectory.
         timestep: Integration timestep for TI.
         lambda_schedule: Lambda schedule ("linear" or "quadratic") or a custom function.
+        mixing_functions: Optional dict with keys "f", "g", "f_prime", "g_prime"
+            for custom mixing. See :func:`~torch_sim.workflows.steered_md.power_mixing`.
 
     Returns:
         Dictionary with free energy results and trajectory data.
@@ -263,6 +266,7 @@ def run_forward_ti_workflow_from_einstein(
         temperature=temperature,
         timestep=timestep,
         pbar=True,
+        mixing_functions=mixing_functions,
     )
 
     # Load trajectory data and compute work values
@@ -327,6 +331,7 @@ def run_forward_backward_ti_workflow_from_einstein(
     n_equil_steps: int = 500,
     timestep: float = 0.002,
     lambda_schedule: str = "linear",
+    mixing_functions: dict[str, Callable] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Run forward-backward thermodynamic integration workflow.
 
@@ -349,6 +354,8 @@ def run_forward_backward_ti_workflow_from_einstein(
         timestep: Integration timestep.
         lambda_schedule: Lambda schedule:
             "linear", "quadratic", "cubic", "lammps" or a custom function.
+        mixing_functions: Optional dict with keys "f", "g", "f_prime", "g_prime"
+            for custom mixing. See :func:`~torch_sim.workflows.steered_md.power_mixing`.
 
     Returns:
         Dictionary with free energy results and trajectory data.
@@ -411,6 +418,7 @@ def run_forward_backward_ti_workflow_from_einstein(
         temperature=temperature,
         timestep=timestep,
         pbar=True,
+        mixing_functions=mixing_functions,
     )
 
     # Equilibrate at model_b
@@ -438,6 +446,7 @@ def run_forward_backward_ti_workflow_from_einstein(
         temperature=temperature,
         timestep=timestep,
         pbar=True,
+        mixing_functions=mixing_functions,
     )
 
     # Compute work values for both directions
@@ -526,6 +535,7 @@ def run_thermodynamic_integration_from_einstein(
     frequencies: torch.Tensor | None = None,
     n_ti_steps: int = 1000,
     timestep: float = 0.002,
+    mixing_functions: dict[str, Callable] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Run standard forward thermodynamic integration workflow.
 
@@ -542,6 +552,8 @@ def run_thermodynamic_integration_from_einstein(
         frequencies: Precomputed Einstein model frequencies.
         n_ti_steps: Number of TI steps per trajectory.
         timestep: Integration timestep for TI.
+        mixing_functions: Optional dict with keys "f", "g", "f_prime", "g_prime"
+            for custom mixing. See :func:`~torch_sim.workflows.steered_md.power_mixing`.
 
     Returns:
         Dictionary with free energy results and trajectory data.
@@ -594,6 +606,7 @@ def run_thermodynamic_integration_from_einstein(
             temperature=temperature,
             timestep=timestep,
             pbar=True,
+            mixing_functions=mixing_functions,
         )
     else:
         # Define reference Einstein model
@@ -617,6 +630,7 @@ def run_thermodynamic_integration_from_einstein(
                 temperature=temperature,
                 timestep=timestep,
                 pbar=True,
+                mixing_functions=mixing_functions,
             )
 
     # Load trajectory data and compute work values

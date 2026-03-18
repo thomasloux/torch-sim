@@ -15,7 +15,7 @@ from torch_sim.testing import SIMSTATE_GENERATORS
 
 DEVICE = torch.device("cpu")
 DTYPE = torch.float64
-
+torch.set_num_threads(4)
 
 def _make_simstate_fixture(name: str) -> Callable[[], ts.SimState]:
     """Create a pytest fixture for a sim_state generator."""

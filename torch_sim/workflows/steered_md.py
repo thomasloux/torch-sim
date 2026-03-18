@@ -73,9 +73,8 @@ class ThermodynamicIntegrationMDState(NVTVRescaleState):
 class MixedModel(ModelInterface):
     """A model that mixes two models for thermodynamic integration.
 
-    This class implements a linear combination of two models based on a lambda
-    parameter, which is used for thermodynamic integration calculations to
-    compute free energy differences.
+    Computes H(λ) = g(λ) H₁ + f(λ) H₂, with dH/dλ = g'(λ) H₁ + f'(λ) H₂.
+    Defaults to linear mixing: f(λ)=λ, g(λ)=1-λ.
     """
 
     def __init__(
@@ -87,6 +86,10 @@ class MixedModel(ModelInterface):
         *,
         compute_stress: bool = False,
         compute_forces: bool = True,
+        f: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        g: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        f_prime: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        g_prime: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> None:
         """Initialize the mixed model.
 
@@ -97,6 +100,10 @@ class MixedModel(ModelInterface):
             dtype: Data type for computations
             compute_stress: Whether to compute stress
             compute_forces: Whether to compute forces
+            f: Mixing function for model2 energies, f(λ). Defaults to λ.
+            g: Mixing function for model1 energies, g(λ). Defaults to 1-λ.
+            f_prime: Derivative of f w.r.t. λ. Defaults to 1.
+            g_prime: Derivative of g w.r.t. λ. Defaults to -1.
         """
         super().__init__()
         self.model1 = model1
@@ -110,6 +117,14 @@ class MixedModel(ModelInterface):
         self._dtype = dtype
         self._compute_stress = compute_stress
         self._compute_forces = compute_forces
+
+        # Mixing functions: H(λ) = g(λ) H₁ + f(λ) H₂
+        self.f = f if f is not None else lambda x: x
+        self.g = g if g is not None else lambda x: 1 - x
+        self.f_prime = f_prime if f_prime is not None else lambda x: torch.ones_like(x)  # noqa: PLW0108
+        self.g_prime = (
+            g_prime if g_prime is not None else lambda x: -torch.ones_like(x)
+        )
 
     def forward(self, state: ts.SimState) -> dict[str, torch.Tensor]:
         """Forward pass through the mixed model.
@@ -125,16 +140,49 @@ class MixedModel(ModelInterface):
         out1 = self.model1(state)
         out2 = self.model2(state)
 
-        # Combine matching keys
+        # H(λ) = g(λ) H₁ + f(λ) H₂
+        g_val = self.g(lambda_)
+        f_val = self.f(lambda_)
+        g_val_per_atom = self.g(lambda_per_atom)
+        f_val_per_atom = self.f(lambda_per_atom)
+
         output = {}
-        output["energy"] = (1 - lambda_) * out1["energy"] + lambda_ * out2["energy"]
-        output["forces"] = (1 - lambda_per_atom).view(-1, 1) * out1["forces"] + (
-            lambda_per_atom
-        ).view(-1, 1) * out2["forces"]
-        output["energy_difference"] = out2["energy"] - out1["energy"]
+        output["energy"] = g_val * out1["energy"] + f_val * out2["energy"]
+        output["forces"] = g_val_per_atom.view(-1, 1) * out1[
+            "forces"
+        ] + f_val_per_atom.view(-1, 1) * out2["forces"]
+
+        # dH/dλ = g'(λ) H₁ + f'(λ) H₂
+        output["energy_difference"] = (
+            self.g_prime(lambda_) * out1["energy"]
+            + self.f_prime(lambda_) * out2["energy"]
+        )
         output["energy1"] = out1["energy"]
         output["energy2"] = out2["energy"]
         return output
+
+
+def power_mixing(
+    m: float,
+) -> dict[str, Callable[[torch.Tensor], torch.Tensor]]:
+    """Return f, g, f_prime, g_prime for power-law mixing with exponent m.
+
+    Produces mixing functions f(λ) = λ^m and g(λ) = (1-λ)^m, so that
+    H(λ) = (1-λ)^m H₁ + λ^m H₂.
+
+    Args:
+        m: Power-law exponent. m=1 recovers standard linear mixing.
+
+    Returns:
+        Dictionary with keys "f", "g", "f_prime", "g_prime" suitable for
+        passing to MixedModel via ``MixedModel(..., **power_mixing(m))``.
+    """
+    return {
+        "f": lambda x, _m=m: x**_m,
+        "g": lambda x, _m=m: (1 - x) ** _m,
+        "f_prime": lambda x, _m=m: _m * x ** (_m - 1),
+        "g_prime": lambda x, _m=m: -_m * (1 - x) ** (_m - 1),
+    }
 
 
 def velocity_verlet_steered_md[T: ThermodynamicIntegrationMDState](
@@ -307,6 +355,7 @@ def run_non_equilibrium_md(  # noqa: C901 PLR0915
     step_frequency: int = 1,
     autobatcher: bool = False,
     state_frequency: int = 50,
+    mixing_functions: dict[str, Callable] | None = None,
 ) -> ts.SimState:
     """Run non-equilibrium molecular dynamics simulation.
 
@@ -328,6 +377,8 @@ def run_non_equilibrium_md(  # noqa: C901 PLR0915
         step_frequency: Frequency for reporting steps
         autobatcher: Whether to use automatic batching
         state_frequency: Frequency for state reporting
+        mixing_functions: Optional dict with keys "f", "g", "f_prime", "g_prime"
+            for custom mixing. See :func:`power_mixing` for a convenience factory.
 
     Returns:
         Final simulation state
@@ -360,6 +411,7 @@ def run_non_equilibrium_md(  # noqa: C901 PLR0915
         model2=model_b,
         device=model_b.device,
         dtype=model_b.dtype,
+        **(mixing_functions or {}),
     )
     state: SimState = initialize_state(system, model.device, model.dtype)
     dtype, device = state.dtype, state.device
@@ -490,6 +542,7 @@ def run_equilibrium_md(  # noqa: C901
     filenames: str | None = None,
     autobatcher: bool = False,
     state_frequency: int = 50,
+    mixing_functions: dict[str, Callable] | None = None,
 ) -> ts.SimState:
     """Run equilibrium molecular dynamics simulation.
 
@@ -511,6 +564,8 @@ def run_equilibrium_md(  # noqa: C901
             Useful when running sequential thermodynamic integration
         autobatcher: Whether to use automatic batching
         state_frequency: Frequency for state reporting
+        mixing_functions: Optional dict with keys "f", "g", "f_prime", "g_prime"
+            for custom mixing. See :func:`power_mixing` for a convenience factory.
 
     Returns:
         Final simulation state
@@ -533,6 +588,7 @@ def run_equilibrium_md(  # noqa: C901
         model2=model_b,
         device=model_b.device,
         dtype=model_b.dtype,
+        **(mixing_functions or {}),
     )
     state: SimState = initialize_state(system, model.device, model.dtype)
     dtype, device = state.dtype, state.device
