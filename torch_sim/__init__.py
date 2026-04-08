@@ -40,6 +40,7 @@ from torch_sim.integrators import (
 from torch_sim.integrators.npt import (
     NPTLangevinState,
     NPTNoseHooverState,
+    NPTNoseHooverTriclinicState,
     npt_crescale_anisotropic_step,
     npt_crescale_init,
     npt_crescale_isotropic_step,
@@ -48,6 +49,9 @@ from torch_sim.integrators.npt import (
     npt_nose_hoover_init,
     npt_nose_hoover_invariant,
     npt_nose_hoover_step,
+    npt_nose_hoover_triclinic_init,
+    npt_nose_hoover_triclinic_invariant,
+    npt_nose_hoover_triclinic_step,
 )
 from torch_sim.monte_carlo import SwapMCState, swap_mc_init, swap_mc_step
 from torch_sim.optimizers import (
@@ -126,6 +130,7 @@ __all__ = [
     "NPTLangevinState",
     "NPTNoseHooverState",
     "NPTNoseHooverState",
+    "NPTNoseHooverTriclinicState",
     "NVTNoseHooverState",
     "NVTNoseHooverState",
     "OptimState",
@@ -177,6 +182,9 @@ __all__ = [
     "npt_nose_hoover_invariant",
     "npt_nose_hoover_step",
     "npt_nose_hoover_step",
+    "npt_nose_hoover_triclinic_init",
+    "npt_nose_hoover_triclinic_invariant",
+    "npt_nose_hoover_triclinic_step",
     "nve_init",
     "nve_init",
     "nve_step",

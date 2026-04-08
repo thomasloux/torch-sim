@@ -1633,6 +1633,578 @@ def npt_nose_hoover_invariant(
     return e_tot
 
 
+
+@dataclass(kw_only=True)
+class NPTNoseHooverTriclinicState(NPTState):
+    """State for NPT dynamics with fully anisotropic cell fluctuations.
+
+    Implements the Martyna-Tobias-Klein (MTK) equations of motion for a
+    simulation cell whose shape and size can change freely.  The barostat
+    degree of freedom is the full 3x3 cell-momentum matrix *p_g* instead
+    of a single scalar volume momentum.
+
+    Attributes:
+        reference_cell: Reference cell matrix used for the PV term in
+            the conserved quantity.  Shape ``[n_systems, 3, 3]``.
+        cell_momentum: Barostat momentum matrix conjugate to the cell.
+            Shape ``[n_systems, 3, 3]``.
+        cell_mass: Scalar mass parameter for all cell DOFs.
+            Shape ``[n_systems]``.
+        coupling: ``"tri"`` (default, 6 DOF – lower-triangular cell) or
+            ``"full"`` (9 DOF – unconstrained).
+        thermostat: Nose-Hoover chain for particle temperature control.
+        thermostat_fns: Functions for thermostat chain updates.
+        barostat: Nose-Hoover chain for cell-momentum temperature control.
+        barostat_fns: Functions for barostat chain updates.
+    """
+
+    reference_cell: torch.Tensor  # [n_systems, 3, 3]
+    cell_momentum: torch.Tensor  # [n_systems, 3, 3]
+    cell_mass: torch.Tensor  # [n_systems]
+    coupling: str  # "tri" or "full"
+
+    # Thermostat / barostat chains
+    thermostat: NoseHooverChain
+    thermostat_fns: NoseHooverChainFns
+    barostat: NoseHooverChain
+    barostat_fns: NoseHooverChainFns
+
+    _system_attributes = NPTState._system_attributes | {  # noqa: SLF001
+        "reference_cell",
+        "cell_momentum",
+        "cell_mass",
+    }
+    _global_attributes = NPTState._global_attributes | {  # noqa: SLF001
+        "thermostat",
+        "barostat",
+        "thermostat_fns",
+        "barostat_fns",
+        "coupling",
+    }
+
+    @property
+    def velocities(self) -> torch.Tensor:
+        """Particle velocities from momenta and masses."""
+        return self.momenta / self.masses.unsqueeze(-1)
+
+    @property
+    def cell_velocity(self) -> torch.Tensor:
+        """Cell velocity matrix v_g = p_g / W_g.  Shape ``[n_systems, 3, 3]``."""
+        return self.cell_momentum / self.cell_mass[:, None, None]
+
+    def get_number_of_degrees_of_freedom(self) -> torch.Tensor:
+        """Degrees of freedom per system (subtract 3 for COM)."""
+        return super().get_number_of_degrees_of_freedom() - 3
+
+    @property
+    def barostat_dof(self) -> int:
+        """Number of barostat degrees of freedom (6 for tri, 9 for full)."""
+        return 6 if self.coupling == "tri" else 9
+
+
+# -- helpers ----------------------------------------------------------------
+
+
+def _triclinic_nh_zero_lower_triangle(
+    p_g: torch.Tensor,
+) -> torch.Tensor:
+    """Zero the upper-triangle (column > row) of a [B, 3, 3] tensor.
+
+    In this codebase the cell convention is **lower-triangular**
+    (see ``rotate_gram_schmidt``), so the *momentum* must also be
+    lower-triangular:  p_g[i, j] = 0  for j > i.
+    """
+    mask = torch.tril(torch.ones(3, 3, device=p_g.device, dtype=p_g.dtype))
+    return p_g * mask
+
+
+def _triclinic_nh_compute_cell_force(
+    state: NPTNoseHooverTriclinicState,
+    external_pressure: torch.Tensor,
+) -> torch.Tensor:
+    """Compute the 3x3 force on the cell momentum.
+
+    G_g = V * (P_int - P_ext I) + (2 KE / N_f) I
+
+    where P_int is the instantaneous internal pressure tensor returned by
+    ``compute_instantaneous_pressure_tensor``.
+    """
+    dim = state.positions.shape[1]
+    volume = torch.det(state.cell)  # [n_systems]
+
+    P_int = ts.quantities.compute_instantaneous_pressure_tensor(
+        momenta=state.momenta,
+        masses=state.masses,
+        system_idx=state.system_idx,
+        stress=state.stress,
+        volumes=volume,
+    )  # [n_systems, 3, 3]
+
+    eye = torch.eye(dim, device=state.device, dtype=state.dtype)
+
+    N_f = state.get_number_of_degrees_of_freedom()  # [n_systems]
+    KE = ts.calc_kinetic_energy(
+        masses=state.masses, momenta=state.momenta, system_idx=state.system_idx
+    )  # [n_systems]
+
+    return (
+        volume[:, None, None] * (P_int - external_pressure * eye)
+        + (2.0 * KE / N_f)[:, None, None] * eye
+    )
+
+
+def _triclinic_nh_phi1_exp(A: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""Compute exp(A) and phi_1(A) = A^{-1}(exp(A) - I) simultaneously.
+
+    Uses the block-matrix identity::
+
+        exp([[A, I], [0, 0]]) = [[exp(A), phi_1(A)], [0, I]]
+
+    Args:
+        A: Batched matrices of shape ``[B, d, d]``.
+
+    Returns:
+        (exp_A, phi1_A) each of shape ``[B, d, d]``.
+    """
+    B, d, _ = A.shape
+    # Build 2d x 2d block matrix
+    block = torch.zeros(B, 2 * d, 2 * d, device=A.device, dtype=A.dtype)
+    block[:, :d, :d] = A
+    block[:, :d, d:] = torch.eye(d, device=A.device, dtype=A.dtype)
+    # lower-right block stays zero
+    exp_block = torch.matrix_exp(block)
+    return exp_block[:, :d, :d], exp_block[:, :d, d:]
+
+
+def _triclinic_nh_exp_iL1(  # noqa: N802
+    state: NPTNoseHooverTriclinicState,
+    v_g: torch.Tensor,
+    dt: torch.Tensor,
+) -> torch.Tensor:
+    """Position update: r_i -> exp(v_g dt) @ r_i + dt * phi_1(v_g dt) @ v_i.
+
+    Args:
+        state: Current simulation state.
+        v_g: Cell velocity matrix ``[n_systems, 3, 3]``.
+        dt: Timestep (scalar tensor).
+
+    Returns:
+        Updated positions ``[n_particles, 3]``.
+    """
+    A = v_g * dt  # [n_systems, 3, 3]
+    exp_A, phi1_A = _triclinic_nh_phi1_exp(A)
+
+    # Map system-level matrices to atoms
+    exp_A_atoms = exp_A[state.system_idx]  # [n_atoms, 3, 3]
+    phi1_A_atoms = phi1_A[state.system_idx]  # [n_atoms, 3, 3]
+
+    velocities = state.velocities  # [n_atoms, 3]
+    return torch.bmm(exp_A_atoms, state.positions.unsqueeze(-1)).squeeze(
+        -1
+    ) + dt * torch.bmm(phi1_A_atoms, velocities.unsqueeze(-1)).squeeze(-1)
+
+
+def _triclinic_nh_exp_iL2(  # noqa: N802
+    state: NPTNoseHooverTriclinicState,
+    v_g: torch.Tensor,
+    momenta: torch.Tensor,
+    forces: torch.Tensor,
+    dt_2: torch.Tensor,
+) -> torch.Tensor:
+    """Momentum update with matrix-exponential damping.
+
+    p_i -> exp(-A) @ p_i + dt/2 * phi_1(-A) @ F_i
+
+    where A = (v_g + Tr(v_g)/N_f * I) * dt/2.
+    """
+    dim = state.positions.shape[1]
+    N_f = state.get_number_of_degrees_of_freedom()  # [n_systems]
+    eye = torch.eye(dim, device=state.device, dtype=state.dtype)
+    tr_vg = torch.diagonal(v_g, dim1=-2, dim2=-1).sum(dim=-1)  # [n_systems]
+
+    # A = (v_g + Tr(v_g)/N_f * I) * dt/2  -- the "alpha" coupling matrix
+    A = (v_g + (tr_vg / N_f)[:, None, None] * eye) * dt_2  # [n_systems, 3, 3]
+    neg_A = -A
+
+    exp_negA, phi1_negA = _triclinic_nh_phi1_exp(neg_A)
+
+    # Map to atom level
+    exp_negA_atoms = exp_negA[state.system_idx]  # [n_atoms, 3, 3]
+    phi1_negA_atoms = phi1_negA[state.system_idx]  # [n_atoms, 3, 3]
+
+    return torch.bmm(exp_negA_atoms, momenta.unsqueeze(-1)).squeeze(
+        -1
+    ) + dt_2 * torch.bmm(phi1_negA_atoms, forces.unsqueeze(-1)).squeeze(-1)
+
+
+def _triclinic_nh_inner_step(
+    state: NPTNoseHooverTriclinicState,
+    model: ModelInterface,
+    dt: torch.Tensor,
+    external_pressure: torch.Tensor,
+) -> NPTNoseHooverTriclinicState:
+    """Velocity-Verlet-like inner step for anisotropic NPT (steps 3-9).
+
+    Covers iL_{g,2}(dt/2), iL_2(dt/2), iL_{g,1}(dt), iL_1(dt),
+    force eval, iL_2(dt/2), iL_{g,2}(dt/2).
+    """
+    dt_2 = dt / 2
+    cell_momentum = state.cell_momentum
+    momenta = state.momenta
+
+    # -- Step 3: half-step barostat momentum -----------------------------------
+    G_g = _triclinic_nh_compute_cell_force(state, external_pressure)
+    cell_momentum = cell_momentum + dt_2 * G_g
+    if state.coupling == "tri":
+        cell_momentum = _triclinic_nh_zero_lower_triangle(cell_momentum)
+    state.cell_momentum = cell_momentum
+
+    v_g = cell_momentum / state.cell_mass[:, None, None]
+
+    # -- Step 4: half-step particle momenta ------------------------------------
+    momenta = _triclinic_nh_exp_iL2(state, v_g, momenta, state.forces, dt_2)
+    state.set_constrained_momenta(momenta)
+
+    # -- Step 5: full-step cell matrix -----------------------------------------
+    # h_new = exp(v_g dt) @ h.  When v_g is lower-triangular (coupling="tri"),
+    # exp(v_g dt) is also lower-triangular, so the product preserves shape.
+    exp_vg_dt = torch.matrix_exp(v_g * dt)  # [n_systems, 3, 3]
+    state.cell = torch.bmm(exp_vg_dt, state.cell)
+
+    # -- Step 6: full-step particle positions ----------------------------------
+    new_positions = _triclinic_nh_exp_iL1(state, v_g, dt)
+    state.set_constrained_positions(new_positions)
+
+    # -- Step 7: force evaluation ----------------------------------------------
+    model_output = model(state)
+    state.forces = model_output["forces"]
+    state.stress = model_output["stress"]
+    state.energy = model_output["energy"]
+
+    # -- Step 8: half-step particle momenta (new forces) -----------------------
+    momenta = _triclinic_nh_exp_iL2(state, v_g, state.momenta, state.forces, dt_2)
+    state.set_constrained_momenta(momenta)
+
+    # -- Step 9: half-step barostat momentum (new stress) ----------------------
+    G_g = _triclinic_nh_compute_cell_force(state, external_pressure)
+    cell_momentum = state.cell_momentum + dt_2 * G_g
+    if state.coupling == "tri":
+        cell_momentum = _triclinic_nh_zero_lower_triangle(cell_momentum)
+    state.cell_momentum = cell_momentum
+
+    return state
+
+
+# -- public API -------------------------------------------------------------
+
+
+def npt_nose_hoover_triclinic_init(  # noqa: PLR0915
+    state: SimState,
+    model: ModelInterface,
+    *,
+    kT: float | torch.Tensor,
+    dt: float | torch.Tensor,
+    coupling: str = "tri",
+    chain_length: int = 3,
+    chain_steps: int = 2,
+    sy_steps: int = 3,
+    t_tau: float | torch.Tensor | None = None,
+    b_tau: float | torch.Tensor | None = None,
+    **kwargs: Any,
+) -> NPTNoseHooverTriclinicState:
+    r"""Initialize anisotropic NPT Nose-Hoover state.
+
+    Sets up a fully flexible cell NPT simulation using the MTK equations
+    of motion from Martyna, Tobias & Klein (1994) with Nose-Hoover chain
+    thermostats for both particle and cell-momentum temperature control.
+
+    Args:
+        state: Initial :class:`SimState`.
+        model: Potential-energy model returning forces, energy, and stress.
+        kT: Target temperature in energy units.
+        dt: Integration timestep.
+        coupling: ``"tri"`` (default) for lower-triangular cell (6 DOF)
+            or ``"full"`` for unconstrained cell (9 DOF).
+        chain_length: Number of thermostats in each Nose-Hoover chain.
+        chain_steps: Chain integration substeps.
+        sy_steps: Suzuki-Yoshida integration order (1, 3, 5, or 7).
+        t_tau: Thermostat relaxation time.  Defaults to ``10 * dt``.
+        b_tau: Barostat relaxation time.  Defaults to ``100 * dt``.
+        **kwargs: Extra state variables (e.g. ``atomic_numbers``, ``momenta``).
+
+    Returns:
+        Initialized :class:`NPTNoseHooverTriclinicState`.
+    """
+    if coupling not in ("tri", "full"):
+        msg = f"coupling must be 'tri' or 'full', got {coupling!r}"
+        raise ValueError(msg)
+
+    device, dtype = state.device, state.dtype
+    dt_tensor = torch.as_tensor(dt, device=device, dtype=dtype)
+    kT_tensor = torch.as_tensor(kT, device=device, dtype=dtype)
+    t_tau_tensor = torch.as_tensor(
+        10 * dt_tensor if t_tau is None else t_tau, device=device, dtype=dtype
+    )
+    b_tau_tensor = torch.as_tensor(
+        100 * dt_tensor if b_tau is None else b_tau, device=device, dtype=dtype
+    )
+
+    _n_particles, dim = state.positions.shape
+    n_systems = state.n_systems
+    atomic_numbers = kwargs.get("atomic_numbers", state.atomic_numbers)
+
+    # Build NHC function objects
+    barostat_fns = construct_nose_hoover_chain(
+        dt_tensor, chain_length, chain_steps, sy_steps, b_tau_tensor
+    )
+    thermostat_fns = construct_nose_hoover_chain(
+        dt_tensor, chain_length, chain_steps, sy_steps, t_tau_tensor
+    )
+
+    # Cell momentum - initialised to zero
+    cell_momentum = torch.zeros(n_systems, dim, dim, device=device, dtype=dtype)
+
+    # Cell mass: W_g = (N_f + d) * kT * tau^2 / d  (per system)
+    kT_system = kT_tensor.expand(n_systems) if kT_tensor.ndim == 0 else kT_tensor
+    n_atoms_per_system = torch.bincount(state.system_idx, minlength=n_systems)
+    dof_per_system = dim * n_atoms_per_system.to(dtype=dtype) - 3  # 3N - 3
+    cell_mass = (
+        (dof_per_system + dim) * kT_system * torch.square(b_tau_tensor) / dim
+    ).to(device=device, dtype=dtype)
+
+    # Barostat DOF
+    baro_dof_val = 6 if coupling == "tri" else dim * dim
+    dof_barostat = torch.full((n_systems,), baro_dof_val, device=device, dtype=dtype)
+
+    # KE of barostat (zero at init)
+    KE_cell = torch.zeros(n_systems, device=device, dtype=dtype)
+
+    # Momenta
+    momenta = kwargs.get("momenta")
+    if momenta is None:
+        momenta = getattr(state, "momenta", None)
+    if momenta is None:
+        momenta = initialize_momenta(
+            state.positions, state.masses, state.system_idx, kT_tensor, state.rng
+        )
+
+    KE_thermostat = ts.calc_kinetic_energy(
+        masses=state.masses, momenta=momenta, system_idx=state.system_idx
+    )
+
+    # Reference cell
+    if state.cell.ndim == 2:
+        reference_cell = state.cell.unsqueeze(0).expand(n_systems, -1, -1).clone()
+    else:
+        reference_cell = state.cell.clone()
+
+    if (torch.is_tensor(state.cell) and state.cell.ndim == 0) or isinstance(
+        state.cell, int | float
+    ):
+        cell_matrix = torch.eye(dim, device=device, dtype=dtype) * state.cell
+        reference_cell = cell_matrix.unsqueeze(0).expand(n_systems, -1, -1).clone()
+        state.cell = reference_cell
+
+    # Ensure cell is lower-triangular for "tri" coupling.
+    # When rotating the cell we must also rotate positions so that
+    # fractional coordinates are preserved.
+    if coupling == "tri":
+        old_cell = state.cell if state.cell.ndim == 3 else state.cell.unsqueeze(0)
+        new_cell = rotate_gram_schmidt(old_cell)
+        # Rotation matrix: new_cell = R @ old_cell  =>  R = new_cell @ old_cell^{-1}
+        R = torch.bmm(new_cell, torch.linalg.inv(old_cell))
+        R_atoms = R[state.system_idx]  # [n_atoms, 3, 3]
+        state.positions = torch.bmm(R_atoms, state.positions.unsqueeze(-1)).squeeze(-1)
+        state.cell = new_cell
+        reference_cell = new_cell.clone()
+
+    # Model evaluation
+    model_output = model(state)
+    forces = model_output["forces"]
+    energy = model_output["energy"]
+    stress = model_output["stress"]
+
+    if state.constraints:
+        msg = (
+            "Constraints are present in the system. "
+            "Make sure they are compatible with anisotropic NPT dynamics. "
+            "We recommend not using constraints with NPT dynamics for now."
+        )
+        warnings.warn(msg, UserWarning, stacklevel=3)
+        logger.warning(msg)
+
+    return NPTNoseHooverTriclinicState.from_state(
+        state,
+        momenta=momenta,
+        energy=energy,
+        forces=forces,
+        stress=stress,
+        atomic_numbers=atomic_numbers,
+        reference_cell=reference_cell,
+        cell_momentum=cell_momentum,
+        cell_mass=cell_mass,
+        coupling=coupling,
+        barostat=barostat_fns.initialize(dof_barostat, KE_cell, kT_tensor),
+        thermostat=thermostat_fns.initialize(dof_per_system, KE_thermostat, kT_tensor),
+        barostat_fns=barostat_fns,
+        thermostat_fns=thermostat_fns,
+    )
+
+
+@dcite("10.1063/1.467468")
+@dcite("10.1080/00268979600100761")
+def npt_nose_hoover_triclinic_step(
+    state: NPTNoseHooverTriclinicState,
+    model: ModelInterface,
+    *,
+    dt: float | torch.Tensor,
+    kT: float | torch.Tensor,
+    external_pressure: float | torch.Tensor,
+) -> NPTNoseHooverTriclinicState:
+    r"""Perform one anisotropic NPT integration step with Nose-Hoover chains.
+
+    Implements the fully flexible cell MTK scheme from Martyna, Tobias &
+    Klein (1994) [mtk94]_ with explicit reversible integrators from
+    Martyna *et al.* (1996) [mttk96]_.
+
+    **Equations of motion:**
+
+    .. math::
+
+        \dot{\mathbf{r}}_i &= \frac{\mathbf{p}_i}{m_i}
+            + \mathbf{v}_g\,\mathbf{r}_i \\
+        \dot{\mathbf{p}}_i &= \mathbf{F}_i
+            - \bigl(\mathbf{v}_g
+            + \tfrac{\mathrm{Tr}(\mathbf{v}_g)}{N_f}\,\mathbf{I}\bigr)
+            \,\mathbf{p}_i \\
+        \dot{\mathbf{h}} &= \mathbf{v}_g\,\mathbf{h} \\
+        \dot{\mathbf{p}}_g &= V\bigl(\mathbf{P}_{\mathrm{int}}
+            - P_{\mathrm{ext}}\,\mathbf{I}\bigr)
+            + \tfrac{2K}{N_f}\,\mathbf{I}
+
+    where :math:`\mathbf{v}_g = \mathbf{p}_g / W_g`.
+
+    Args:
+        state: Current :class:`NPTNoseHooverTriclinicState`.
+        model: Potential-energy model.
+        dt: Integration timestep.
+        kT: Target temperature in energy units.
+        external_pressure: Target external pressure (scalar, hydrostatic).
+
+    Returns:
+        Updated :class:`NPTNoseHooverTriclinicState`.
+
+    References:
+        .. [mtk94] Martyna, G. J., Tobias, D. J. & Klein, M. L.
+           "Constant pressure molecular dynamics algorithms."
+           J. Chem. Phys. **101**, 4177-4189 (1994).
+        .. [mttk96] Martyna, G. J. *et al.* "Explicit reversible integrators
+           for extended systems dynamics."
+           Mol. Phys. **87**, 1117-1157 (1996).
+    """
+    device, dtype = model.device, model.dtype
+    dt_tensor = torch.as_tensor(dt, device=device, dtype=dtype)
+    kT_tensor = torch.as_tensor(kT, device=device, dtype=dtype)
+    external_pressure_tensor = torch.as_tensor(
+        external_pressure, device=device, dtype=dtype
+    )
+
+    # Update chain masses for new kT
+    state.barostat = state.barostat_fns.update_mass(state.barostat, kT_tensor)
+    state.thermostat = state.thermostat_fns.update_mass(state.thermostat, kT_tensor)
+
+    # Update cell mass
+    dim = state.positions.shape[1]
+    kT_sys = kT_tensor.expand(state.n_systems) if kT_tensor.ndim == 0 else kT_tensor
+    n_atoms_per_system = torch.bincount(state.system_idx, minlength=state.n_systems)
+    dof = dim * n_atoms_per_system.to(dtype=dtype) - 3
+    state.cell_mass = ((dof + dim) * kT_sys * torch.square(state.barostat.tau) / dim).to(
+        device=device, dtype=dtype
+    )
+
+    n_systems = state.n_systems
+    cell_system_idx = torch.arange(n_systems, device=device)
+
+    # -- Step 1: NHC-barostat half step ----------------------------------------
+    flat_pg = state.cell_momentum.reshape(n_systems, -1)  # [n_sys, 9]
+    flat_pg, state.barostat = state.barostat_fns.half_step(
+        flat_pg, state.barostat, kT_tensor, cell_system_idx
+    )
+    state.cell_momentum = flat_pg.reshape(n_systems, dim, dim)
+    if state.coupling == "tri":
+        state.cell_momentum = _triclinic_nh_zero_lower_triangle(state.cell_momentum)
+
+    # -- Step 2: NHC-thermostat half step --------------------------------------
+    state.momenta, state.thermostat = state.thermostat_fns.half_step(
+        state.momenta, state.thermostat, kT_tensor, state.system_idx
+    )
+
+    # -- Steps 3-9: inner Verlet step ------------------------------------------
+    state = _triclinic_nh_inner_step(state, model, dt_tensor, external_pressure_tensor)
+
+    # -- Step 10: update KE for chains -----------------------------------------
+    KE = ts.calc_kinetic_energy(
+        masses=state.masses, momenta=state.momenta, system_idx=state.system_idx
+    )
+    state.thermostat.kinetic_energy = KE
+
+    flat_pg = state.cell_momentum.reshape(n_systems, -1)
+    KE_cell = torch.sum(flat_pg**2, dim=-1) / (2 * state.cell_mass)
+    state.barostat.kinetic_energy = KE_cell
+
+    # -- Step 11: NHC-thermostat half step -------------------------------------
+    state.momenta, state.thermostat = state.thermostat_fns.half_step(
+        state.momenta, state.thermostat, kT_tensor, state.system_idx
+    )
+
+    # -- Step 12: NHC-barostat half step ---------------------------------------
+    flat_pg = state.cell_momentum.reshape(n_systems, -1)
+    flat_pg, state.barostat = state.barostat_fns.half_step(
+        flat_pg, state.barostat, kT_tensor, cell_system_idx
+    )
+    state.cell_momentum = flat_pg.reshape(n_systems, dim, dim)
+    if state.coupling == "tri":
+        state.cell_momentum = _triclinic_nh_zero_lower_triangle(state.cell_momentum)
+
+    return state
+
+
+def npt_nose_hoover_triclinic_invariant(
+    state: NPTNoseHooverTriclinicState,
+    kT: torch.Tensor,
+    external_pressure: torch.Tensor,
+) -> torch.Tensor:
+    """Conserved quantity for the anisotropic NPT Nose-Hoover ensemble.
+
+    Includes potential and kinetic energies, barostat kinetic energy,
+    PV work, and thermostat / barostat chain energies.
+    """
+    volume = torch.det(state.cell)  # [n_systems]
+    e_pot = state.energy
+
+    e_kin = ts.calc_kinetic_energy(
+        masses=state.masses, momenta=state.momenta, system_idx=state.system_idx
+    )
+
+    dof_per_system = state.get_number_of_degrees_of_freedom()
+    e_tot = e_pot + e_kin
+
+    # Thermostat chain energy
+    e_tot = e_tot + _compute_chain_energy(state.thermostat, kT, e_tot, dof_per_system)
+
+    # Barostat chain energy
+    baro_dof = torch.full_like(dof_per_system, state.barostat_dof)
+    e_tot = e_tot + _compute_chain_energy(state.barostat, kT, e_tot, baro_dof)
+
+    # PV term
+    e_tot = e_tot + external_pressure * volume
+
+    # Barostat kinetic energy: Tr(p_g^T p_g) / (2 W_g)
+    flat_pg = state.cell_momentum.reshape(state.n_systems, -1)
+    return e_tot + torch.sum(flat_pg**2, dim=-1) / (2 * state.cell_mass)
+
+
+
 @dataclass(kw_only=True)
 class NPTCRescaleState(NPTState):
     """State for NPT ensemble with cell rescaling barostat.
