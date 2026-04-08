@@ -16,6 +16,8 @@ NVT:
 NPT:
     - Langevin barostat integrator :func:`npt.npt_langevin_step` [4, 5]
     - Nosé-Hoover barostat integrator :func:`npt.npt_nose_hoover_step` from [10]
+    - Triclinic Nosé-Hoover barostat (full cell flexibility)
+        :func:`npt.npt_nose_hoover_triclinic_step` from [10]
     - Isotropic C-Rescale barostat integrator :func:`npt.npt_crescale_isotropic_step`
     from [6, 8, 9]
     - C-Rescale barostat integrator :func:`npt.npt_crescale_anisotropic_step`
@@ -75,6 +77,7 @@ from .md import MDState, initialize_momenta, momentum_step, position_step, veloc
 from .npt import (
     NPTLangevinState,
     NPTNoseHooverState,
+    NPTNoseHooverTriclinicState,
     npt_crescale_anisotropic_step,
     npt_crescale_init,
     npt_crescale_isotropic_step,
@@ -83,6 +86,9 @@ from .npt import (
     npt_nose_hoover_init,
     npt_nose_hoover_invariant,
     npt_nose_hoover_step,
+    npt_nose_hoover_triclinic_init,
+    npt_nose_hoover_triclinic_invariant,
+    npt_nose_hoover_triclinic_step,
 )
 from .nve import nve_init, nve_step
 from .nvt import (
@@ -112,6 +118,8 @@ class Integrator(StrEnum):
         - ``npt_langevin``: Langevin barostat for constant temperature and pressure.
         - ``npt_nose_hoover``: Nosé-Hoover barostat for constant temperature
                 and constant pressure.
+        - ``npt_nose_hoover_triclinic``: Triclinic Nosé-Hoover barostat
+                for constant temperature and pressure with full cell flexibility.
         - ``npt_isotropic_crescale``: Isotropic C-Rescale barostat for constant
                 temperature and pressure with fixed cell shape.
         - ``npt_anisotropic_crescale``: Anisotropic C-Rescale barostat for constant
@@ -130,6 +138,7 @@ class Integrator(StrEnum):
     nvt_nose_hoover = "nvt_nose_hoover"
     npt_langevin = "npt_langevin"
     npt_nose_hoover = "npt_nose_hoover"
+    npt_nose_hoover_triclinic = "npt_nose_hoover_triclinic"
     npt_isotropic_crescale = "npt_isotropic_crescale"
     npt_anisotropic_crescale = "npt_anisotropic_crescale"
 
@@ -156,6 +165,7 @@ class Integrator(StrEnum):
 #: - ``Integrator.nvt_nose_hoover``: Nosé-Hoover thermostat
 #: - ``Integrator.npt_langevin``: Langevin barostat
 #: - ``Integrator.npt_nose_hoover``: Nosé-Hoover barostat
+#: - ``Integrator.npt_nose_hoover_triclinic``: Triclinic Nosé-Hoover barostat
 #: - ``Integrator.npt_isotropic_crescale``: Isotropic NPT C-Rescale barostat
 #: - ``Integrator.npt_anisotropic_crescale``: Anisotropic NPT C-Rescale barostat
 #:
@@ -169,6 +179,10 @@ INTEGRATOR_REGISTRY: Final[
     Integrator.nvt_nose_hoover: (nvt_nose_hoover_init, nvt_nose_hoover_step),
     Integrator.npt_langevin: (npt_langevin_init, npt_langevin_step),
     Integrator.npt_nose_hoover: (npt_nose_hoover_init, npt_nose_hoover_step),
+    Integrator.npt_nose_hoover_triclinic: (
+        npt_nose_hoover_triclinic_init,
+        npt_nose_hoover_triclinic_step,
+    ),
     Integrator.npt_isotropic_crescale: (npt_crescale_init, npt_crescale_isotropic_step),
     Integrator.npt_anisotropic_crescale: (
         npt_crescale_init,

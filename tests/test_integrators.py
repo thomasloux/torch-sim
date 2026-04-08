@@ -926,6 +926,114 @@ def test_npt_nose_hoover_multi_kt(
         assert invariant_std / invariant_traj.mean() < 0.15
 
 
+def test_npt_nose_hoover_triclinic_step_accepts_float_inputs(
+    ar_double_sim_state: ts.SimState, lj_model: LennardJonesModel
+) -> None:
+    """npt_nose_hoover_triclinic_step accepts float dt/kT/external_pressure inputs."""
+    state = ts.npt_nose_hoover_triclinic_init(
+        state=ar_double_sim_state,
+        model=lj_model,
+        dt=0.001,
+        kT=300 * MetalUnits.temperature,
+    )
+
+    next_state = ts.npt_nose_hoover_triclinic_step(
+        state=state,
+        model=lj_model,
+        dt=0.001,
+        kT=300 * MetalUnits.temperature,
+        external_pressure=0.0 * MetalUnits.pressure,
+    )
+    assert next_state.positions.shape == state.positions.shape
+    assert next_state.momenta.shape == state.momenta.shape
+    assert next_state.cell_momentum.shape == (state.n_systems, 3, 3)
+
+
+def test_npt_nose_hoover_triclinic_invariant_conservation(
+    ar_double_sim_state: ts.SimState, lj_model: LennardJonesModel
+):
+    """Test that the anisotropic NPT NH conserved quantity is stable."""
+    dtype = torch.float64
+    n_steps = 200
+    dt = torch.tensor(0.001, dtype=dtype)
+    kT = torch.tensor([300, 500], dtype=dtype) * MetalUnits.temperature
+    external_pressure = torch.tensor(0.0, dtype=dtype) * MetalUnits.pressure
+
+    ar_double_sim_state.rng = 42
+    state = ts.npt_nose_hoover_triclinic_init(
+        state=ar_double_sim_state,
+        model=lj_model,
+        dt=dt,
+        kT=kT,
+    )
+    invariants = []
+    temperatures = []
+    for _step in range(n_steps):
+        state = ts.npt_nose_hoover_triclinic_step(
+            state=state,
+            model=lj_model,
+            dt=dt,
+            kT=kT,
+            external_pressure=external_pressure,
+        )
+        temp = ts.calc_kT(
+            masses=state.masses, momenta=state.momenta, system_idx=state.system_idx
+        )
+        temperatures.append(temp / MetalUnits.temperature)
+        invariants.append(
+            ts.npt_nose_hoover_triclinic_invariant(state, kT, external_pressure)
+        )
+
+    temperatures_tensor = torch.stack(temperatures)
+    invariants_tensor = torch.stack(invariants)
+
+    # Check temperature is roughly maintained
+    mean_temps = torch.mean(temperatures_tensor, dim=0)
+    assert torch.allclose(mean_temps, kT / MetalUnits.temperature, rtol=0.5)
+
+    # Check invariant conservation for each system
+    for traj_idx in range(invariants_tensor.shape[1]):
+        invariant_traj = invariants_tensor[:, traj_idx]
+        invariant_std = invariant_traj.std()
+        assert invariant_std / invariant_traj.abs().mean() < 0.15
+
+
+def test_npt_nose_hoover_triclinic_tri_coupling(
+    ar_double_sim_state: ts.SimState, lj_model: LennardJonesModel
+):
+    """Test that coupling='tri' keeps cell lower-triangular and p_g lower-triangular."""
+    dtype = torch.float64
+    dt = torch.tensor(0.001, dtype=dtype)
+    kT = torch.tensor(300, dtype=dtype) * MetalUnits.temperature
+    external_pressure = torch.tensor(0.0, dtype=dtype) * MetalUnits.pressure
+
+    ar_double_sim_state.rng = 42
+    state = ts.npt_nose_hoover_triclinic_init(
+        state=ar_double_sim_state,
+        model=lj_model,
+        dt=dt,
+        kT=kT,
+        coupling="tri",
+    )
+
+    for _step in range(50):
+        state = ts.npt_nose_hoover_triclinic_step(
+            state=state,
+            model=lj_model,
+            dt=dt,
+            kT=kT,
+            external_pressure=external_pressure,
+        )
+
+    # Cell momentum upper triangle should be zero
+    for sys_idx in range(state.n_systems):
+        pg = state.cell_momentum[sys_idx]
+        assert torch.allclose(
+            torch.triu(pg, diagonal=1),
+            torch.zeros_like(torch.triu(pg, diagonal=1)),
+        ), "cell_momentum upper triangle is not zero in 'tri' coupling"
+
+
 def test_nve(ar_double_sim_state: ts.SimState, lj_model: LennardJonesModel):
     n_steps = 100
     dt = torch.tensor(0.001, dtype=DTYPE)
