@@ -425,8 +425,14 @@ class PlumedModel(ModelInterface):
         Returns:
             dict[str, torch.Tensor]: Computed properties with PLUMED bias applied:
 
-                - ``"energy"``: Biased total energy with shape ``[n_systems]``.
-                - ``"forces"``: Biased atomic forces with shape ``[n_atoms, 3]``.
+                - ``"energy"``: Total energy (unbiased + bias) with shape
+                  ``[n_systems]``.
+                - ``"forces"``: Total forces (unbiased + bias) with shape
+                  ``[n_atoms, 3]``.
+                - ``"biased_energy"``: PLUMED bias energy only, with shape
+                  ``[n_systems]``.
+                - ``"biased_forces"``: PLUMED bias forces only, with shape
+                  ``[n_atoms, 3]``.
                 - ``"stress"``: Stress tensor with shape ``[n_systems, 3, 3]`` (if
                   the model computes stress; note the PLUMED virial is not applied
                   to stress).
@@ -442,6 +448,8 @@ class PlumedModel(ModelInterface):
 
         total_energy = model_output["energy"].clone()
         total_forces = model_output["forces"].clone()
+        bias_energy = torch.zeros(n_systems, device=state.device, dtype=state.dtype)
+        bias_forces = torch.zeros_like(total_forces)
 
         for i in range(n_systems):
             mask = state.system_idx == i
@@ -480,6 +488,8 @@ class PlumedModel(ModelInterface):
             forces_bias_t = torch.from_numpy(forces_bias_i.copy()).to(
                 device=state.device, dtype=state.dtype
             )
+            bias_forces[mask] = forces_bias_t
+            bias_energy[i] = bias_i[0]
             total_forces[mask] += forces_bias_t
             total_energy[i] += bias_i[0]
 
@@ -488,6 +498,8 @@ class PlumedModel(ModelInterface):
         result: dict[str, torch.Tensor] = {
             "energy": total_energy,
             "forces": total_forces,
+            "biased_energy": bias_energy,
+            "biased_forces": bias_forces,
         }
         if "stress" in model_output:
             result["stress"] = model_output["stress"]
