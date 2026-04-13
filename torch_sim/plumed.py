@@ -275,6 +275,13 @@ class PlumedModel(ModelInterface):
                 "tensors. Reported stress will reflect only the unbiased model.",
                 stacklevel=2,
             )
+        if getattr(model, "retain_graph", False):
+            warnings.warn(
+                "PlumedModel computes bias forces via numpy, so they are detached "
+                "from the autograd graph. The wrapped model has retain_graph=True "
+                "but PLUMED bias forces will not carry gradients.",
+                stacklevel=2,
+            )
         self.model = model
         self.plumed_input = _normalize_plumed_input(plumed_input)
         self.timestep = timestep
