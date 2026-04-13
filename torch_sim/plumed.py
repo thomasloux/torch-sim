@@ -443,10 +443,10 @@ class PlumedModel(ModelInterface):
                   ``[n_systems]``.
                 - ``"forces"``: Total forces (unbiased + bias) with shape
                   ``[n_atoms, 3]``.
-                - ``"biased_energy"``: PLUMED bias energy only, with shape
-                  ``[n_systems]``.
-                - ``"biased_forces"``: PLUMED bias forces only, with shape
-                  ``[n_atoms, 3]``.
+                - ``"plumed_bias_energy"``: PLUMED bias energy correction
+                  only, with shape ``[n_systems]``.
+                - ``"plumed_bias_forces"``: PLUMED bias force correction
+                  only, with shape ``[n_atoms, 3]``.
                 - ``"stress"``: Stress tensor with shape ``[n_systems, 3, 3]`` (if
                   the model computes stress; note the PLUMED virial is not applied
                   to stress).
@@ -512,8 +512,8 @@ class PlumedModel(ModelInterface):
         result: dict[str, torch.Tensor] = {
             "energy": total_energy,
             "forces": total_forces,
-            "biased_energy": bias_energy,
-            "biased_forces": bias_forces,
+            "plumed_bias_energy": bias_energy,
+            "plumed_bias_forces": bias_forces,
         }
         if "stress" in model_output:
             result["stress"] = model_output["stress"]
