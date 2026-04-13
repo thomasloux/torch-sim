@@ -38,14 +38,7 @@ import math
 from abc import ABC, abstractmethod
 from collections import Counter
 
-
-# ---------------------------------------------------------------------------
-# Unit conversion constants
-# (same values as in torch_sim.plumed; defined here to avoid circular imports)
-# ---------------------------------------------------------------------------
-
-_PLUMED_LENGTH_FACTOR: float = 0.1  # 1 Å = 0.1 nm
-_PLUMED_ENERGY_FACTOR: float = 96.4853321  # 1 eV = 96.4853321 kJ/mol
+from torch_sim.plumed import _PLUMED_ENERGY_FACTOR, _PLUMED_LENGTH_FACTOR
 
 
 # ---------------------------------------------------------------------------
