@@ -42,6 +42,7 @@ Notes:
 from __future__ import annotations
 
 import re
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -268,6 +269,12 @@ class PlumedModel(ModelInterface):
                 Defaults to ``False``.
         """
         super().__init__()
+        if model.compute_stress:
+            warnings.warn(
+                "PlumedModel does not apply PLUMED virial corrections to stress "
+                "tensors. Reported stress will reflect only the unbiased model.",
+                stacklevel=2,
+            )
         self.model = model
         self.plumed_input = _normalize_plumed_input(plumed_input)
         self.timestep = timestep
